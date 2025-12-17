@@ -1,0 +1,173 @@
+# ================================
+# Imports
+# ================================
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import logging
+from google.colab import files
+
+# ================================
+# Configuration
+# ================================
+sns.set_theme(style="whitegrid")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s: %(message)s")
+
+# ================================
+# Helper Functions
+# ================================
+def fmt(x, digits: int = 2):
+    try:
+        if pd.isna(x):
+            return "NA"
+        if isinstance(x, float):
+            return f"{x:.{digits}f}"
+        return str(x)
+    except Exception:
+        return str(x)
+
+
+def print_block(title: str):
+    sep = "=" * max(len(title) + 8, 60)
+    print("\n" + sep)
+    print(f"  {title}")
+    print(sep + "\n")
+
+
+def print_subtitle(sub: str):
+    sep = "-" * max(len(sub) + 4, 40)
+    print("\n" + sep)
+    print(f"  {sub}")
+    print(sep + "\n")
+
+# ================================
+# Upload Files
+# ================================
+print("📁 Upload CropYieldDB.csv")
+uploaded_crop = files.upload()
+
+if "CropYieldDB.csv" not in uploaded_crop:
+    raise FileNotFoundError("CropYieldDB.csv was not uploaded")
+
+print("📁 Upload RegionWeatherDB.csv")
+uploaded_weather = files.upload()
+
+if "RegionWeatherDB.csv" not in uploaded_weather:
+    raise FileNotFoundError("RegionWeatherDB.csv was not uploaded")
+
+CROP_PATH = "CropYieldDB.csv"
+WEATHER_PATH = "RegionWeatherDB.csv"
+WEATHER_NROWS = 10000
+
+# ================================
+# Load & Preprocess Data
+# ================================
+def load_data():
+    crop = pd.read_csv(CROP_PATH)
+    weather = pd.read_csv(WEATHER_PATH, low_memory=False).head(WEATHER_NROWS)
+    logging.info(f"Loaded crop rows={crop.shape[0]} | weather rows={weather.shape[0]}")
+    return crop, weather
+
+
+def preprocess(crop: pd.DataFrame, weather: pd.DataFrame):
+    crop = crop.copy()
+    weather = weather.copy()
+
+    # Clean state names
+    crop["State_clean"] = crop["State"].astype(str).str.strip().str.upper()
+
+    if "state_name" in weather.columns:
+        weather["State_clean"] = weather["state_name"].astype(str).str.strip().str.upper()
+    elif "State" in weather.columns:
+        weather["State_clean"] = weather["State"].astype(str).str.strip().str.upper()
+
+    # Numeric columns
+    for col in ["Area_Hectares", "Production_Tonnes", "Yield_KgPerHa", "Year"]:
+        if col in crop.columns:
+            crop[col] = pd.to_numeric(crop[col], errors="coerce")
+
+    # Date handling
+    if "date" in weather.columns:
+        weather["date_dt"] = pd.to_datetime(weather["date"], errors="coerce")
+        weather["Year"] = weather["date_dt"].dt.year
+
+    # Rainfall column detection
+    rain_cols = ["actual", "rain", "Rainfall", "rainfall", "Actual", "rfs"]
+    rain_col = next((c for c in rain_cols if c in weather.columns), None)
+
+    weather["Rain_mm"] = (
+        pd.to_numeric(weather[rain_col], errors="coerce").fillna(0)
+        if rain_col else 0
+    )
+
+    crop.drop_duplicates(inplace=True)
+    logging.info("Preprocessing complete")
+    return crop, weather
+
+
+crop, weather = load_data()
+crop, weather = preprocess(crop, weather)
+
+# ================================
+# UNIT I — NumPy Fundamentals
+# ================================
+print_block("UNIT I — NumPy Fundamentals")
+
+yields = crop["Yield_KgPerHa"].dropna().to_numpy()
+
+print_subtitle("Yield Statistics")
+print(f"Mean Yield: {fmt(np.mean(yields))}")
+print(f"Std Deviation: {fmt(np.std(yields))}")
+
+plt.figure(figsize=(8, 4))
+sns.histplot(yields, bins=30, kde=True)
+plt.xlabel("Yield (Kg/Ha)")
+plt.title("Yield Distribution")
+plt.tight_layout()
+plt.show()
+
+# ================================
+# UNIT II — Aggregation
+# ================================
+print_block("UNIT II — Aggregation")
+
+crop_sy = (
+    crop.groupby(["State_clean", "Year"], as_index=False)
+    .agg(
+        Total_Area=("Area_Hectares", "sum"),
+        Total_Prod=("Production_Tonnes", "sum"),
+        Avg_Yield=("Yield_KgPerHa", "mean")
+    )
+)
+
+weather_sy = (
+    weather.groupby(["State_clean", "Year"], as_index=False)
+    .agg(Yearly_Rain=("Rain_mm", "sum"))
+)
+
+state_year = pd.merge(crop_sy, weather_sy,
+                      on=["State_clean", "Year"], how="left")
+
+state_year["Prod_per_Ha"] = (
+    state_year["Total_Prod"] * 1000 /
+    state_year["Total_Area"].replace(0, np.nan)
+)
+
+display(state_year.head())
+
+# ================================
+# Correlation Analysis
+# ================================
+print_block("Rainfall vs Yield Correlation")
+
+corrs = []
+for state, grp in state_year.groupby("State_clean"):
+    grp = grp.dropna(subset=["Yearly_Rain", "Avg_Yield"])
+    if len(grp) >= 3:
+        corrs.append((state, grp["Yearly_Rain"].corr(grp["Avg_Yield"])))
+
+corr_df = pd.DataFrame(corrs, columns=["State", "Correlation"])
+display(corr_df.sort_values("Correlation", ascending=False).head())
+display(corr_df.sort_values("Correlation").head())
